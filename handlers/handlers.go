@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"compress/gzip"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -34,6 +35,7 @@ type Config struct {
 	MaxFileSize     int64
 	DownloadTimeout time.Duration
 	RateLimit       int
+	Token           string
 }
 
 // Handler holds handler dependencies
@@ -102,6 +104,89 @@ func (h *Handler) RateLimit(next http.HandlerFunc) http.HandlerFunc {
 
 		record.requests++
 		clientsMu.Unlock()
+		next(w, r)
+	}
+}
+
+// RequireAuth protects management handlers with the shared admin token
+// sent as "Authorization: Bearer <token>".
+func (h *Handler) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !h.isValidAdminToken(r) {
+			h.respondJSON(w, http.StatusUnauthorized, Response{
+				Success: false,
+				Error:   "未授权，请输入访问密钥",
+			})
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (h *Handler) isValidAdminToken(r *http.Request) bool {
+	const scheme = "Bearer "
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, scheme) {
+		return false
+	}
+	provided := strings.TrimPrefix(auth, scheme)
+	if provided == "" || h.config.Token == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(h.config.Token)) == 1
+}
+
+// validLinkToken reports whether the request carries the expected capability
+// token for a public subscription/template link.
+func validLinkToken(r *http.Request, secret string) bool {
+	if secret == "" {
+		return false
+	}
+	provided := r.URL.Query().Get("token")
+	if provided == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(secret)) == 1
+}
+
+// SubscriptionLinkAuth guards the public download endpoint. The subscription
+// link must include "?token=" plus the subscription's current access token.
+func (h *Handler) SubscriptionLinkAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		subscription, err := GetSubscription(mux.Vars(r)["id"], filepath.Join(h.config.DataDir, "subscriptions.json"))
+		if err != nil {
+			h.respondJSON(w, http.StatusNotFound, Response{Success: false, Error: "无效的下载链接"})
+			return
+		}
+		if !validLinkToken(r, subscription.AccessToken) {
+			h.respondJSON(w, http.StatusNotFound, Response{Success: false, Error: "链接已失效，请重新复制下载地址"})
+			return
+		}
+		next(w, r)
+	}
+}
+
+// TemplateLinkAuth guards public template render endpoints. Works for both
+// "/api/templates/{id}/render..." and "/api/templates/default/render...".
+func (h *Handler) TemplateLinkAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := mux.Vars(r)["id"]
+		dataFile := filepath.Join(h.config.DataDir, "templates.json")
+		var item *models.Template
+		var err error
+		if id == "" || id == "default" {
+			item, err = GetDefaultTemplate(dataFile)
+		} else {
+			item, err = GetTemplate(id, dataFile)
+		}
+		if err != nil {
+			h.respondJSON(w, http.StatusNotFound, Response{Success: false, Error: "无效的模板链接"})
+			return
+		}
+		if !validLinkToken(r, item.AccessToken) {
+			h.respondJSON(w, http.StatusNotFound, Response{Success: false, Error: "链接已失效，请重新复制模板地址"})
+			return
+		}
 		next(w, r)
 	}
 }
@@ -441,6 +526,32 @@ func (h *Handler) RefreshSubscriptionHandler(w http.ResponseWriter, r *http.Requ
 	h.respondJSON(w, http.StatusOK, Response{
 		Success: true,
 		Message: "Subscription refreshed successfully",
+		Data:    updatedSub,
+	})
+}
+
+// ResetSubscriptionHandler rotates the public download-link token so any old
+// link stops working immediately.
+func (h *Handler) ResetSubscriptionHandler(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	dataFile := filepath.Join(h.config.DataDir, "subscriptions.json")
+
+	updatedSub, err := UpdateSubscription(id, dataFile, func(sub *models.Subscription) error {
+		sub.AccessToken = generateToken()
+		sub.UpdatedAt = time.Now()
+		return nil
+	})
+	if err != nil {
+		h.respondJSON(w, http.StatusInternalServerError, Response{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to reset subscription link: %v", err),
+		})
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, Response{
+		Success: true,
+		Message: "订阅链接已重置，旧链接已失效",
 		Data:    updatedSub,
 	})
 }

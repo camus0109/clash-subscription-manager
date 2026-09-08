@@ -2,6 +2,7 @@
 let subscriptions = [];
 let templates = [];
 let currentTemplateId = null;
+let currentTemplateToken = "";
 
 // ── Utilities ────────────────────────────────────────────────────────────────
 
@@ -13,9 +14,82 @@ function api(path, options = {}) {
   return fetch(`/api${path}`, { ...options, headers: { ...headers, ...options.headers } })
     .then(async (res) => {
       const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      if (!res.ok) {
+        const err = new Error(json.error || `HTTP ${res.status}`);
+        err.status = res.status;
+        if (res.status === 401) showLogin();
+        throw err;
+      }
       return json;
     });
+}
+
+// ── Auth / Login ─────────────────────────────────────────────────────────────
+
+const AUTH_KEY = "token";
+
+function getAuthKey() {
+  try {
+    return localStorage.getItem(AUTH_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function setAuthKey(key) {
+  try {
+    localStorage.setItem(AUTH_KEY, key);
+  } catch {
+    /* ignore */
+  }
+}
+
+function clearAuthKey() {
+  try {
+    localStorage.removeItem(AUTH_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+function showLogin() {
+  const overlay = document.getElementById("login-overlay");
+  if (overlay) overlay.hidden = false;
+}
+
+function hideLogin() {
+  const overlay = document.getElementById("login-overlay");
+  if (overlay) overlay.hidden = true;
+}
+
+function showLoginError(message) {
+  const errorEl = document.getElementById("login-error");
+  if (!errorEl) return;
+  errorEl.textContent = message;
+  errorEl.hidden = false;
+}
+
+function hideLoginError() {
+  const errorEl = document.getElementById("login-error");
+  if (errorEl) errorEl.hidden = true;
+}
+
+async function tryLoadAll() {
+  try {
+    await loadSubscriptions();
+    await loadTemplates();
+    return true;
+  } catch (err) {
+    if (err && err.status === 401) return false;
+    showToast("加载失败: " + (err.message || err), true);
+    return true;
+  }
+}
+
+function afterLoginReady() {
+  updateDashboardMetrics();
+  newTemplate();
+  renderTemplateList();
 }
 
 function showToast(message, isError = false) {
@@ -33,6 +107,23 @@ function copyToClipboard(text) {
     () => showToast("已复制到剪贴板"),
     () => showToast("复制失败，请手动复制", true)
   );
+}
+
+function subscriptionDownloadUrl(sub) {
+  if (!sub) return "";
+  const token = encodeURIComponent(sub.access_token || "");
+  return `${location.origin}/download/${sub.id}?token=${token}`;
+}
+
+const TEMPLATE_RENDER_SUFFIX = {
+  providers: "render",
+  proxies: "render-proxies",
+  nodes: "render-nodes",
+};
+
+function templateCopyPath(mode) {
+  const suffix = TEMPLATE_RENDER_SUFFIX[mode] || "render";
+  return `/api/templates/${currentTemplateId}/${suffix}?token=${encodeURIComponent(currentTemplateToken || "")}`;
 }
 
 function formatBytes(bytes) {
@@ -270,6 +361,7 @@ function renderSubscriptionList() {
       </div>
       <div class="subscription-actions">
         <button type="button" class="btn btn-secondary btn-compact copy-download-btn" data-id="${sub.id}">复制下载地址</button>
+        <button type="button" class="btn btn-secondary btn-compact reset-subscription-link-btn" data-id="${sub.id}" title="重新生成下载链接，旧链接立即失效">重置链接</button>
         <button type="button" class="btn btn-secondary btn-compact edit-subscription-btn" data-id="${sub.id}">编辑</button>
         ${sub.url !== "nodes://manual" ? `<button type="button" class="btn btn-secondary btn-compact refresh-subscription-btn" data-id="${sub.id}">刷新</button>` : ""}
         <button type="button" class="btn btn-danger btn-compact delete-subscription-btn" data-id="${sub.id}">删除</button>
@@ -299,7 +391,14 @@ function renderSubscriptionList() {
 
   // Bind events
   listEl.querySelectorAll(".copy-download-btn").forEach((btn) => {
-    btn.addEventListener("click", () => copyToClipboard(`${location.origin}/download/${btn.dataset.id}`));
+    btn.addEventListener("click", () => {
+      const sub = subscriptions.find((s) => s.id === btn.dataset.id);
+      if (sub) copyToClipboard(subscriptionDownloadUrl(sub));
+      else copyToClipboard(`${location.origin}/download/${btn.dataset.id}`);
+    });
+  });
+  listEl.querySelectorAll(".reset-subscription-link-btn").forEach((btn) => {
+    btn.addEventListener("click", () => resetSubscriptionLink(btn.dataset.id));
   });
   listEl.querySelectorAll(".edit-subscription-btn").forEach((btn) => {
     btn.addEventListener("click", () => openEditModal(btn.dataset.id));
@@ -372,12 +471,30 @@ function initSubscriptionForm() {
 
 // ── Subscription CRUD ─────────────────────────────────────────────────────────
 
+async function resetSubscriptionLink(id) {
+  try {
+    const res = await api(`/subscribe/${id}/reset`, { method: "POST" });
+    if (!res.success) {
+      showToast(res.error || "重置失败", true);
+      return;
+    }
+    const updated = res.data;
+    const idx = subscriptions.findIndex((s) => s.id === id);
+    if (idx >= 0 && updated) subscriptions[idx] = updated;
+    renderSubscriptionList();
+    showToast("订阅链接已重置，旧链接已失效");
+  } catch (err) {
+    if (!(err && err.status === 401)) showToast(err.message, true);
+  }
+}
+
 async function loadSubscriptions() {
   try {
     const res = await api("/subscriptions");
     subscriptions = res.data || [];
     renderSubscriptionList();
   } catch (err) {
+    if (err && err.status === 401) throw err;
     showToast("加载订阅失败: " + err.message, true);
   }
 }
@@ -572,6 +689,7 @@ async function selectTemplate(id) {
     const res = await api(`/templates/${id}`);
     if (res.success) {
       currentTemplateId = id;
+      currentTemplateToken = res.data?.access_token || "";
       populateTemplateForm(res.data);
       renderTemplateList();
     }
@@ -752,13 +870,31 @@ function initTemplateForm() {
   });
 
   document.getElementById("copy-template-url-btn")?.addEventListener("click", () => {
-    if (currentTemplateId) copyToClipboard(`${location.origin}/api/templates/${currentTemplateId}/render`);
+    if (currentTemplateId) copyToClipboard(`${location.origin}${templateCopyPath("providers")}`);
     else showToast("请先选择一个模板", true);
   });
 
   document.getElementById("copy-expanded-template-url-btn")?.addEventListener("click", () => {
-    if (currentTemplateId) copyToClipboard(`${location.origin}/api/templates/${currentTemplateId}/render-proxies`);
+    if (currentTemplateId) copyToClipboard(`${location.origin}${templateCopyPath("proxies")}`);
     else showToast("请先选择一个模板", true);
+  });
+
+  document.getElementById("reset-template-link-btn")?.addEventListener("click", async () => {
+    if (!currentTemplateId) {
+      showToast("请先选择一个模板", true);
+      return;
+    }
+    try {
+      const res = await api(`/templates/${currentTemplateId}/reset`, { method: "POST" });
+      if (!res.success) {
+        showToast(res.error || "重置失败", true);
+        return;
+      }
+      currentTemplateToken = res.data?.access_token || "";
+      showToast("模板链接已重置，旧链接已失效");
+    } catch (err) {
+      if (!(err && err.status === 401)) showToast(err.message, true);
+    }
   });
 
   // Copy dropdown
@@ -778,12 +914,7 @@ function initTemplateForm() {
           return;
         }
         const mode = item.dataset.copy;
-        const paths = {
-          providers: `/api/templates/${currentTemplateId}/render`,
-          proxies: `/api/templates/${currentTemplateId}/render-proxies`,
-          nodes: `/api/templates/${currentTemplateId}/render-nodes`,
-        };
-        copyToClipboard(`${location.origin}${paths[mode]}`);
+        copyToClipboard(`${location.origin}${templateCopyPath(mode)}`);
         copyMenu.classList.add("hidden");
       });
     });
@@ -823,6 +954,7 @@ function initTemplateForm() {
 
 function newTemplate() {
   currentTemplateId = null;
+  currentTemplateToken = "";
   const form = document.getElementById("template-form");
   if (form) {
     form.reset();
@@ -848,6 +980,7 @@ async function loadTemplates() {
     templates = res.data || [];
     renderTemplateList();
   } catch (err) {
+    if (err && err.status === 401) throw err;
     showToast("加载模板失败: " + err.message, true);
   }
 }
@@ -865,6 +998,8 @@ function initReloadButton() {
       await loadTemplates();
       updateDashboardMetrics();
       showToast("已刷新");
+    } catch (err) {
+      if (!(err && err.status === 401)) showToast(err.message, true);
     } finally {
       btn.disabled = false;
       btn.textContent = orig;
@@ -872,7 +1007,50 @@ function initReloadButton() {
   });
 }
 
-// ── Init ─────────────────────────────────────────────────────────────────────
+// ── Auth UI / Init ───────────────────────────────────────────────────────────
+
+function initLogin() {
+  const form = document.getElementById("login-form");
+  const input = document.getElementById("login-key-input");
+  const logoutBtn = document.getElementById("logout-btn");
+
+  form?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const key = (input?.value || "").trim();
+    if (!key) return;
+
+    setAuthKey(key);
+    hideLoginError();
+    const ok = await tryLoadAll();
+    if (!ok) {
+      clearAuthKey();
+      if (input) input.select();
+      showLoginError("密钥错误，请重新输入");
+      return;
+    }
+    hideLogin();
+    if (input) input.value = "";
+    afterLoginReady();
+  });
+
+  logoutBtn?.addEventListener("click", () => {
+    clearAuthKey();
+    subscriptions = [];
+    templates = [];
+    currentTemplateId = null;
+    currentTemplateToken = "";
+    hideLoginError();
+    const subUpdated = document.getElementById("subscription-last-updated");
+    if (subUpdated) subUpdated.textContent = "等待数据载入";
+    const tplUpdated = document.getElementById("template-last-updated");
+    if (tplUpdated) tplUpdated.textContent = "等待数据载入";
+    newTemplate();
+    renderSubscriptionList();
+    renderTemplateList();
+    updateDashboardMetrics();
+    showLogin();
+  });
+}
 
 document.addEventListener("DOMContentLoaded", async () => {
   initTabs();
@@ -882,10 +1060,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   initSubscriptionForm();
   initTemplateForm();
   initReloadButton();
+  initLogin();
 
-  await loadSubscriptions();
-  await loadTemplates();
-  newTemplate();
-  updateDashboardMetrics();
-  renderTemplateList();
+  const ok = await tryLoadAll();
+  if (ok) {
+    hideLogin();
+    afterLoginReady();
+  } else {
+    showLogin();
+  }
 });

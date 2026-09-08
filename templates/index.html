@@ -29,6 +29,7 @@
                 <div class="hero-actions">
                     <button type="button" id="hero-subscribe-btn" class="btn btn-primary">新增订阅</button>
                     <button type="button" id="hero-template-btn" class="btn btn-secondary">新建模板</button>
+                    <button type="button" id="logout-btn" class="btn btn-ghost">退出登录</button>
                 </div>
             </div>
 
@@ -130,6 +131,7 @@
                                             <button type="button" class="copy-dropdown-item" data-copy="nodes">复制非Clash模式</button>
                                         </div>
                                     </div>
+                                    <button type="button" id="reset-template-link-btn" class="btn btn-ghost" title="重新生成模板链接，旧链接立即失效">重置链接</button>
                                     <button type="button" id="delete-template-btn" class="btn btn-danger">删除模板</button>
                                 </div>
                             </div>
@@ -253,6 +255,22 @@
                 </div>
             </section>
         </main>
+    </div>
+
+    <div id="login-overlay" class="login-overlay" hidden>
+        <div class="login-card">
+            <p class="eyebrow">Clash Subscription Manager</p>
+            <h1>需要访问密钥</h1>
+            <p class="login-hint">请输入 config.yaml 中配置的访问密钥（token）后使用。</p>
+            <form id="login-form" class="form-stack">
+                <label class="field">
+                    <span>访问密钥</span>
+                    <input type="password" id="login-key-input" autocomplete="current-password" placeholder="输入访问密钥" required>
+                </label>
+                <button type="submit" class="btn btn-primary btn-block">登录</button>
+            </form>
+            <p id="login-error" class="login-error" hidden></p>
+        </div>
     </div>
 
     <div id="toast" class="toast hidden">

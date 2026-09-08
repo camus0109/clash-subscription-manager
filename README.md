@@ -65,13 +65,28 @@ starting clash-subscription-manager v1.0.13 on port 8080
 docker build -t zhf883680/clash-subscription-manager:latest .
 ```
 
-运行容器：
+运行容器（推荐通过环境变量预配置访问密钥）：
 
 ```bash
-docker run -d --name clashManage  -p 8080:8080 \
+docker run -d --name clashManage -p 8080:8080 \
+  -e TOKEN="请改成你的强随机访问密钥" \
   -v $(pwd)/data:/app/data \
   zhf883680/clash-subscription-manager:latest
 ```
+
+> **访问密钥（token）规则**
+> - 设置了环境变量 `TOKEN`：直接使用它作为访问密钥，不会改动 `config.yaml`。
+> - `config.yaml` 中已配置非默认 `token`：直接使用该值。
+> - 两者都没有（或还是默认的 `your-secret-token`）：启动时**自动生成随机密钥**，写入 `config.yaml` 并在日志中打印一行，例如：
+>   `未配置访问密钥，已随机生成并写入 config.yaml: <32位hex>`
+> - 查看日志取密钥：`docker logs clashManage`。注意容器重建后若未挂载配置，生成的密钥会丢失，建议用 `-e TOKEN=...` 或挂载 `config.yaml`。
+
+## 安全说明（公网部署）
+
+- **访问密钥**：`config.yaml` 中的 `token`（或环境变量 `TOKEN`）就是管理密钥。打开页面后需要先输入该密钥才能使用；所有 `/api/*` 管理接口也会校验 `Authorization: Bearer <token>`。未配置时会自动生成并写入 `config.yaml` 且打印到日志，见上文「Docker 使用」。
+- **订阅/模板链接**：`/download/{id}` 与 `/api/templates/{id}/render*` 是给 Clash 等客户端匿名拉取的，每个订阅和模板都带独立的随机 `?token=`（旧数据首次启动会自动补齐）。页面上的「重置链接」按钮可以随时作废旧链接——泄露后点一下重置，旧链接立即失效，无需改全局密钥。
+- **升级提醒**：本次改动后订阅/模板的对外链接格式变为 `...?token=xxx`，需要重新点「复制下载地址 / 复制地址」获取一次新链接并更新到 Clash。
+- **Nginx 反代**：建议把之前对 `/` 的 basic auth 去掉（页面已内置登录），反代只负责 HTTPS 即可；Clash 拉取 `/download/...`、`/api/templates/.../render*` 时链接自带 token，无需额外登录。`/health` 若不需要公网探活可在反代层屏蔽。
 
 ## 可优化模块
 

@@ -78,6 +78,9 @@ func AddTemplate(template models.Template, dataFile string) (*models.Template, e
 
 	now := time.Now()
 	template.ID = generateID()
+	if template.AccessToken == "" {
+		template.AccessToken = generateToken()
+	}
 	if template.CreatedAt.IsZero() {
 		template.CreatedAt = now
 	}

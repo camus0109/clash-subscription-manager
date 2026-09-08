@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -111,6 +112,32 @@ func (h *Handler) TemplateHandler(w http.ResponseWriter, r *http.Request) {
 			Error:   "Method not allowed",
 		})
 	}
+}
+
+// ResetTemplateHandler rotates the template's public render-link token so any
+// old render/render-proxies/render-nodes links stop working immediately.
+func (h *Handler) ResetTemplateHandler(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	dataFile := filepath.Join(h.config.DataDir, "templates.json")
+
+	updated, err := UpdateTemplate(id, dataFile, func(template *models.Template) error {
+		template.AccessToken = generateToken()
+		template.UpdatedAt = time.Now()
+		return nil
+	})
+	if err != nil {
+		h.respondJSON(w, http.StatusInternalServerError, Response{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to reset template link: %v", err),
+		})
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, Response{
+		Success: true,
+		Message: "模板链接已重置，旧链接已失效",
+		Data:    updated,
+	})
 }
 
 func (h *Handler) RenderTemplateHandler(w http.ResponseWriter, r *http.Request) {
@@ -371,7 +398,7 @@ func (h *Handler) buildTemplateProviders(r *http.Request, subscriptions []models
 
 		providers = append(providers, templateProvider{
 			Name:             subscription.Name,
-			URL:              absoluteDownloadURL(r, subscription.ID),
+			URL:              absoluteDownloadURL(r, subscription.ID, subscription.AccessToken),
 			Path:             "./proxies/" + path.Base(fileName),
 			Filter:           strings.TrimSpace(subscription.Filter),
 			AdditionalPrefix: prefix,
@@ -527,8 +554,12 @@ func renderQuotedScalar(value string) string {
 var yamlPlainSafePattern = regexp.MustCompile(`^[\p{L}\p{N}_./:@%+\-| ]+$`)
 var yamlUnicodeEscapePattern = regexp.MustCompile(`\\U[0-9A-Fa-f]{8}|\\u[0-9A-Fa-f]{4}`)
 
-func absoluteDownloadURL(r *http.Request, id string) string {
-	return fmt.Sprintf("%s://%s/download/%s", requestScheme(r), r.Host, id)
+func absoluteDownloadURL(r *http.Request, id string, accessToken string) string {
+	base := fmt.Sprintf("%s://%s/download/%s", requestScheme(r), r.Host, id)
+	if accessToken == "" {
+		return base
+	}
+	return base + "?token=" + url.QueryEscape(accessToken)
 }
 
 func requestScheme(r *http.Request) string {

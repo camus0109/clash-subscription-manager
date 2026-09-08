@@ -5,6 +5,7 @@ import "time"
 // Subscription represents a proxy subscription
 type Subscription struct {
 	ID             string            `json:"id"`
+	AccessToken    string            `json:"access_token,omitempty"`
 	Name           string            `json:"name"`
 	URL            string            `json:"url"`
 	Filter         string            `json:"filter,omitempty"`

@@ -5,6 +5,7 @@ import "time"
 // Template represents an editable Clash config template.
 type Template struct {
 	ID                      string            `json:"id"`
+	AccessToken             string            `json:"access_token,omitempty"`
 	Name                    string            `json:"name"`
 	Content                 string            `json:"content"`
 	IsDefault               bool              `json:"is_default"`

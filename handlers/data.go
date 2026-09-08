@@ -100,8 +100,11 @@ func AddSubscription(subscription models.Subscription, dataFile string) (*models
 		return nil, fmt.Errorf("failed to load subscriptions: %w", err)
 	}
 
-	// Generate unique ID
+	// Generate unique ID and public link token
 	subscription.ID = generateID()
+	if subscription.AccessToken == "" {
+		subscription.AccessToken = generateToken()
+	}
 	now := time.Now()
 	if subscription.CreatedAt.IsZero() {
 		subscription.CreatedAt = now
@@ -220,4 +223,57 @@ func generateID() string {
 		return fmt.Sprintf("%x", timestamp)
 	}
 	return hex.EncodeToString(b)
+}
+
+// generateToken generates a 128-bit random capability token (32 hex chars)
+// used in public subscription/download links so they can be revoked by resetting.
+func generateToken() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to timestamp+ID based token if crypto/rand fails
+		return generateID() + generateID()
+	}
+	return hex.EncodeToString(b)
+}
+
+// EnsureAccessTokens backfills access_token for records created before
+// link tokens were introduced, so every public link is protected and resettable.
+func EnsureAccessTokens(dataDir string) error {
+	subscriptionsFile := filepath.Join(dataDir, "subscriptions.json")
+	subscriptions, err := LoadSubscriptions(subscriptionsFile)
+	if err != nil {
+		return fmt.Errorf("load subscriptions for migration: %w", err)
+	}
+	subsChanged := false
+	for i := range subscriptions {
+		if subscriptions[i].AccessToken == "" {
+			subscriptions[i].AccessToken = generateToken()
+			subsChanged = true
+		}
+	}
+	if subsChanged {
+		if err := SaveSubscriptions(subscriptions, subscriptionsFile); err != nil {
+			return fmt.Errorf("save subscriptions after migration: %w", err)
+		}
+	}
+
+	templatesFile := filepath.Join(dataDir, "templates.json")
+	templates, err := LoadTemplates(templatesFile)
+	if err != nil {
+		return fmt.Errorf("load templates for migration: %w", err)
+	}
+	templatesChanged := false
+	for i := range templates {
+		if templates[i].AccessToken == "" {
+			templates[i].AccessToken = generateToken()
+			templatesChanged = true
+		}
+	}
+	if templatesChanged {
+		if err := SaveTemplates(templates, templatesFile); err != nil {
+			return fmt.Errorf("save templates after migration: %w", err)
+		}
+	}
+
+	return nil
 }
