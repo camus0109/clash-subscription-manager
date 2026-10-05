@@ -243,6 +243,7 @@ func TestDownloadHandlerServesStoredSubscriptionFile(t *testing.T) {
 
 func TestHomeHandlerRendersStaticAssetLinks(t *testing.T) {
 	handler := NewHandler(&Config{
+		WebAssets:       os.DirFS(".."),
 		DataDir:         t.TempDir(),
 		MaxFileSize:     1024,
 		DownloadTimeout: 0,
@@ -348,6 +349,7 @@ func TestHomeHandlerRendersStaticAssetLinks(t *testing.T) {
 
 func TestHomeHandlerRendersHeroLogoBranding(t *testing.T) {
 	handler := NewHandler(&Config{
+		WebAssets:       os.DirFS(".."),
 		DataDir:         t.TempDir(),
 		MaxFileSize:     1024,
 		DownloadTimeout: 0,
@@ -382,6 +384,7 @@ func TestHomeHandlerRendersHeroLogoBranding(t *testing.T) {
 
 func TestHomeHandlerRendersFaviconLink(t *testing.T) {
 	handler := NewHandler(&Config{
+		WebAssets:       os.DirFS(".."),
 		DataDir:         t.TempDir(),
 		MaxFileSize:     1024,
 		DownloadTimeout: 0,

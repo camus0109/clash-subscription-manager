@@ -13,10 +13,9 @@ import (
 	"clash-subscription-manager/models"
 )
 
-// subscriptionCache provides thread-safe caching for subscriptions
+// subscriptionCache serializes subscription file transactions.
 var subscriptionCache struct {
-	subscriptions []models.Subscription
-	mutex         sync.RWMutex
+	mutex sync.Mutex
 }
 
 // LoadSubscriptions loads subscriptions from the specified file
@@ -24,22 +23,23 @@ var subscriptionCache struct {
 func LoadSubscriptions(dataFile string) ([]models.Subscription, error) {
 	subscriptionCache.mutex.Lock()
 	defer subscriptionCache.mutex.Unlock()
+	return loadSubscriptionsLocked(dataFile)
+}
 
+func loadSubscriptionsLocked(dataFile string) ([]models.Subscription, error) {
 	// Check if file exists
 	if _, err := os.Stat(dataFile); os.IsNotExist(err) {
-		subscriptionCache.subscriptions = []models.Subscription{}
 		return []models.Subscription{}, nil
 	}
 
 	// Read file
-	data, err := os.ReadFile(dataFile)
+	data, err := readFile(dataFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read subscriptions file: %w", err)
 	}
 
 	// Handle empty file
 	if len(data) == 0 {
-		subscriptionCache.subscriptions = []models.Subscription{}
 		return []models.Subscription{}, nil
 	}
 
@@ -49,10 +49,7 @@ func LoadSubscriptions(dataFile string) ([]models.Subscription, error) {
 		return nil, fmt.Errorf("failed to parse subscriptions JSON: %w", err)
 	}
 
-	// Update cache
-	subscriptionCache.subscriptions = subscriptions
-
-	return subscriptions, nil
+	return cloneSubscriptions(subscriptions), nil
 }
 
 // SaveSubscriptions saves subscriptions to the specified file
@@ -60,33 +57,22 @@ func LoadSubscriptions(dataFile string) ([]models.Subscription, error) {
 func SaveSubscriptions(subscriptions []models.Subscription, dataFile string) error {
 	subscriptionCache.mutex.Lock()
 	defer subscriptionCache.mutex.Unlock()
+	return saveSubscriptionsLocked(subscriptions, dataFile)
+}
 
-	// Create directory if it doesn't exist
-	dir := filepath.Dir(dataFile)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+func saveSubscriptionsLocked(subscriptions []models.Subscription, dataFile string) error {
+	if err := os.MkdirAll(filepath.Dir(dataFile), 0755); err != nil {
 		return fmt.Errorf("failed to create data directory: %w", err)
 	}
-
 	// Marshal to JSON with indentation
 	data, err := json.MarshalIndent(subscriptions, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal subscriptions: %w", err)
 	}
 
-	// Write to file atomically using temp file
-	tmpFile := dataFile + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
-		return fmt.Errorf("failed to write subscriptions file: %w", err)
-	}
-
-	// Rename temp file to actual file (atomic operation)
-	if err := os.Rename(tmpFile, dataFile); err != nil {
-		os.Remove(tmpFile) // Clean up temp file
+	if err := atomicWriteFile(dataFile, data, 0600); err != nil {
 		return fmt.Errorf("failed to save subscriptions file: %w", err)
 	}
-
-	// Update cache
-	subscriptionCache.subscriptions = subscriptions
 
 	return nil
 }
@@ -94,8 +80,10 @@ func SaveSubscriptions(subscriptions []models.Subscription, dataFile string) err
 // AddSubscription adds a new subscription and saves it to file
 // Automatically generates a unique ID for the subscription
 func AddSubscription(subscription models.Subscription, dataFile string) (*models.Subscription, error) {
-	// Load existing subscriptions
-	subscriptions, err := LoadSubscriptions(dataFile)
+	subscriptionCache.mutex.Lock()
+	defer subscriptionCache.mutex.Unlock()
+
+	subscriptions, err := loadSubscriptionsLocked(dataFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load subscriptions: %w", err)
 	}
@@ -115,7 +103,7 @@ func AddSubscription(subscription models.Subscription, dataFile string) (*models
 	subscriptions = append(subscriptions, subscription)
 
 	// Save to file
-	if err := SaveSubscriptions(subscriptions, dataFile); err != nil {
+	if err := saveSubscriptionsLocked(subscriptions, dataFile); err != nil {
 		return nil, fmt.Errorf("failed to save subscriptions: %w", err)
 	}
 
@@ -125,8 +113,10 @@ func AddSubscription(subscription models.Subscription, dataFile string) (*models
 // DeleteSubscription removes a subscription by ID
 // Returns an error if the subscription is not found
 func DeleteSubscription(id string, dataFile string) error {
-	// Load existing subscriptions
-	subscriptions, err := LoadSubscriptions(dataFile)
+	subscriptionCache.mutex.Lock()
+	defer subscriptionCache.mutex.Unlock()
+
+	subscriptions, err := loadSubscriptionsLocked(dataFile)
 	if err != nil {
 		return fmt.Errorf("failed to load subscriptions: %w", err)
 	}
@@ -134,7 +124,7 @@ func DeleteSubscription(id string, dataFile string) error {
 	// Find and remove subscription
 	found := false
 	var deletedSub *models.Subscription
-	newSubscriptions := make([]models.Subscription, 0, len(subscriptions)-1)
+	newSubscriptions := make([]models.Subscription, 0, len(subscriptions))
 	for _, sub := range subscriptions {
 		if sub.ID != id {
 			newSubscriptions = append(newSubscriptions, sub)
@@ -149,16 +139,18 @@ func DeleteSubscription(id string, dataFile string) error {
 		return fmt.Errorf("subscription with ID %s not found", id)
 	}
 
+	// Save updated list
+	if err := saveSubscriptionsLocked(newSubscriptions, dataFile); err != nil {
+		return fmt.Errorf("failed to save subscriptions: %w", err)
+	}
+
+	// The metadata deletion is durable before removing the derived cache file.
+	// A cache cleanup failure is reported after the subscription is deleted.
 	if deletedSub != nil && deletedSub.FilePath != "" {
 		filePath := filepath.Join(filepath.Dir(dataFile), deletedSub.FilePath)
 		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("failed to remove cached file: %w", err)
+			return fmt.Errorf("subscription deleted but failed to remove cached file: %w", err)
 		}
-	}
-
-	// Save updated list
-	if err := SaveSubscriptions(newSubscriptions, dataFile); err != nil {
-		return fmt.Errorf("failed to save subscriptions: %w", err)
 	}
 
 	return nil
@@ -190,7 +182,10 @@ func ListSubscriptions(dataFile string) ([]models.Subscription, error) {
 
 // UpdateSubscription updates an existing subscription in place and persists the result.
 func UpdateSubscription(id string, dataFile string, updateFn func(*models.Subscription) error) (*models.Subscription, error) {
-	subscriptions, err := LoadSubscriptions(dataFile)
+	subscriptionCache.mutex.Lock()
+	defer subscriptionCache.mutex.Unlock()
+
+	subscriptions, err := loadSubscriptionsLocked(dataFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load subscriptions: %w", err)
 	}
@@ -203,7 +198,7 @@ func UpdateSubscription(id string, dataFile string, updateFn func(*models.Subscr
 		if err := updateFn(&subscriptions[index]); err != nil {
 			return nil, err
 		}
-		if err := SaveSubscriptions(subscriptions, dataFile); err != nil {
+		if err := saveSubscriptionsLocked(subscriptions, dataFile); err != nil {
 			return nil, fmt.Errorf("failed to save subscriptions: %w", err)
 		}
 		updated := subscriptions[index]
@@ -211,6 +206,13 @@ func UpdateSubscription(id string, dataFile string, updateFn func(*models.Subscr
 	}
 
 	return nil, fmt.Errorf("subscription with ID %s not found", id)
+}
+
+func cloneSubscriptions(subscriptions []models.Subscription) []models.Subscription {
+	if subscriptions == nil {
+		return []models.Subscription{}
+	}
+	return append([]models.Subscription(nil), subscriptions...)
 }
 
 // generateID generates a unique ID using crypto/rand
@@ -240,8 +242,10 @@ func generateToken() string {
 // link tokens were introduced, so every public link is protected and resettable.
 func EnsureAccessTokens(dataDir string) error {
 	subscriptionsFile := filepath.Join(dataDir, "subscriptions.json")
-	subscriptions, err := LoadSubscriptions(subscriptionsFile)
+	subscriptionCache.mutex.Lock()
+	subscriptions, err := loadSubscriptionsLocked(subscriptionsFile)
 	if err != nil {
+		subscriptionCache.mutex.Unlock()
 		return fmt.Errorf("load subscriptions for migration: %w", err)
 	}
 	subsChanged := false
@@ -252,14 +256,18 @@ func EnsureAccessTokens(dataDir string) error {
 		}
 	}
 	if subsChanged {
-		if err := SaveSubscriptions(subscriptions, subscriptionsFile); err != nil {
+		if err := saveSubscriptionsLocked(subscriptions, subscriptionsFile); err != nil {
+			subscriptionCache.mutex.Unlock()
 			return fmt.Errorf("save subscriptions after migration: %w", err)
 		}
 	}
+	subscriptionCache.mutex.Unlock()
 
 	templatesFile := filepath.Join(dataDir, "templates.json")
-	templates, err := LoadTemplates(templatesFile)
+	templateCache.mutex.Lock()
+	templates, err := loadTemplatesLocked(templatesFile)
 	if err != nil {
+		templateCache.mutex.Unlock()
 		return fmt.Errorf("load templates for migration: %w", err)
 	}
 	templatesChanged := false
@@ -270,10 +278,12 @@ func EnsureAccessTokens(dataDir string) error {
 		}
 	}
 	if templatesChanged {
-		if err := SaveTemplates(templates, templatesFile); err != nil {
+		if err := saveTemplatesLocked(templates, templatesFile); err != nil {
+			templateCache.mutex.Unlock()
 			return fmt.Errorf("save templates after migration: %w", err)
 		}
 	}
+	templateCache.mutex.Unlock()
 
 	return nil
 }

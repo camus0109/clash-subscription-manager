@@ -12,25 +12,25 @@ import (
 )
 
 var templateCache struct {
-	templates []models.Template
-	mutex     sync.RWMutex
+	mutex sync.Mutex
 }
 
 func LoadTemplates(dataFile string) ([]models.Template, error) {
 	templateCache.mutex.Lock()
 	defer templateCache.mutex.Unlock()
+	return loadTemplatesLocked(dataFile)
+}
 
+func loadTemplatesLocked(dataFile string) ([]models.Template, error) {
 	if _, err := os.Stat(dataFile); os.IsNotExist(err) {
-		templateCache.templates = []models.Template{}
 		return []models.Template{}, nil
 	}
 
-	data, err := os.ReadFile(dataFile)
+	data, err := readFile(dataFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read templates file: %w", err)
 	}
 	if len(data) == 0 {
-		templateCache.templates = []models.Template{}
 		return []models.Template{}, nil
 	}
 
@@ -39,39 +39,36 @@ func LoadTemplates(dataFile string) ([]models.Template, error) {
 		return nil, fmt.Errorf("failed to parse templates JSON: %w", err)
 	}
 
-	templateCache.templates = templates
-	return templates, nil
+	return cloneTemplates(templates), nil
 }
 
 func SaveTemplates(templates []models.Template, dataFile string) error {
 	templateCache.mutex.Lock()
 	defer templateCache.mutex.Unlock()
+	return saveTemplatesLocked(templates, dataFile)
+}
 
-	dir := filepath.Dir(dataFile)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+func saveTemplatesLocked(templates []models.Template, dataFile string) error {
+	if err := os.MkdirAll(filepath.Dir(dataFile), 0755); err != nil {
 		return fmt.Errorf("failed to create data directory: %w", err)
 	}
-
 	data, err := json.MarshalIndent(templates, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal templates: %w", err)
 	}
 
-	tmpFile := dataFile + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
-		return fmt.Errorf("failed to write templates file: %w", err)
-	}
-	if err := os.Rename(tmpFile, dataFile); err != nil {
-		_ = os.Remove(tmpFile)
+	if err := atomicWriteFile(dataFile, data, 0600); err != nil {
 		return fmt.Errorf("failed to save templates file: %w", err)
 	}
 
-	templateCache.templates = templates
 	return nil
 }
 
 func AddTemplate(template models.Template, dataFile string) (*models.Template, error) {
-	templates, err := LoadTemplates(dataFile)
+	templateCache.mutex.Lock()
+	defer templateCache.mutex.Unlock()
+
+	templates, err := loadTemplatesLocked(dataFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load templates: %w", err)
 	}
@@ -93,7 +90,7 @@ func AddTemplate(template models.Template, dataFile string) (*models.Template, e
 	}
 
 	templates = append(templates, template)
-	if err := SaveTemplates(templates, dataFile); err != nil {
+	if err := saveTemplatesLocked(templates, dataFile); err != nil {
 		return nil, fmt.Errorf("failed to save templates: %w", err)
 	}
 	return &template, nil
@@ -130,7 +127,10 @@ func GetDefaultTemplate(dataFile string) (*models.Template, error) {
 }
 
 func UpdateTemplate(id string, dataFile string, updateFn func(*models.Template) error) (*models.Template, error) {
-	templates, err := LoadTemplates(dataFile)
+	templateCache.mutex.Lock()
+	defer templateCache.mutex.Unlock()
+
+	templates, err := loadTemplatesLocked(dataFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load templates: %w", err)
 	}
@@ -147,7 +147,7 @@ func UpdateTemplate(id string, dataFile string, updateFn func(*models.Template) 
 			clearDefaultTemplateFlag(templates[:index])
 			clearDefaultTemplateFlag(templates[index+1:])
 		}
-		if err := SaveTemplates(templates, dataFile); err != nil {
+		if err := saveTemplatesLocked(templates, dataFile); err != nil {
 			return nil, fmt.Errorf("failed to save templates: %w", err)
 		}
 		updated := templates[index]
@@ -158,7 +158,10 @@ func UpdateTemplate(id string, dataFile string, updateFn func(*models.Template) 
 }
 
 func SetDefaultTemplate(id string, dataFile string) (*models.Template, error) {
-	templates, err := LoadTemplates(dataFile)
+	templateCache.mutex.Lock()
+	defer templateCache.mutex.Unlock()
+
+	templates, err := loadTemplatesLocked(dataFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load templates: %w", err)
 	}
@@ -170,7 +173,7 @@ func SetDefaultTemplate(id string, dataFile string) (*models.Template, error) {
 		}
 		templates[index].IsDefault = true
 		templates[index].UpdatedAt = time.Now()
-		if err := SaveTemplates(templates, dataFile); err != nil {
+		if err := saveTemplatesLocked(templates, dataFile); err != nil {
 			return nil, fmt.Errorf("failed to save templates: %w", err)
 		}
 		updated := templates[index]
@@ -181,7 +184,10 @@ func SetDefaultTemplate(id string, dataFile string) (*models.Template, error) {
 }
 
 func DeleteTemplate(id string, dataFile string) error {
-	templates, err := LoadTemplates(dataFile)
+	templateCache.mutex.Lock()
+	defer templateCache.mutex.Unlock()
+
+	templates, err := loadTemplatesLocked(dataFile)
 	if err != nil {
 		return fmt.Errorf("failed to load templates: %w", err)
 	}
@@ -204,7 +210,7 @@ func DeleteTemplate(id string, dataFile string) error {
 		nextTemplates[0].IsDefault = true
 		nextTemplates[0].UpdatedAt = time.Now()
 	}
-	if err := SaveTemplates(nextTemplates, dataFile); err != nil {
+	if err := saveTemplatesLocked(nextTemplates, dataFile); err != nil {
 		return fmt.Errorf("failed to save templates: %w", err)
 	}
 	return nil
@@ -214,4 +220,11 @@ func clearDefaultTemplateFlag(templates []models.Template) {
 	for index := range templates {
 		templates[index].IsDefault = false
 	}
+}
+
+func cloneTemplates(templates []models.Template) []models.Template {
+	if templates == nil {
+		return []models.Template{}
+	}
+	return append([]models.Template(nil), templates...)
 }

@@ -121,6 +121,14 @@
                                     <input type="text" name="name" maxlength="100" placeholder="例如：我的主配置" required>
                                 </label>
 
+                                <label class="field">
+                                    <span>托管方式</span>
+                                    <select name="mode" id="template-mode-input">
+                                        <option value="raw">完整配置原样托管</option>
+                                        <option value="generated">按订阅生成配置</option>
+                                    </select>
+                                </label>
+
                                 <div class="template-form-actions sticky-actions">
                                     <button type="submit" id="template-submit-btn" class="btn btn-primary">保存模板</button>
                                     <div class="copy-dropdown-wrapper">
@@ -150,8 +158,12 @@
                             </fieldset>
 
                             <label class="field editor-field">
-                                <span>模板内容</span>
-                                <textarea name="content" id="template-content-input" rows="20" placeholder="输入基础 YAML 配置" required></textarea>
+                                <div class="field-header">
+                                    <span>模板内容</span>
+                                    <label class="btn btn-secondary btn-compact" for="template-file-input">导入 YAML</label>
+                                    <input type="file" id="template-file-input" accept=".yaml,.yml,text/yaml" hidden>
+                                </div>
+                                <textarea name="content" id="template-content-input" rows="20" placeholder="输入完整 Clash YAML 配置" required></textarea>
                             </label>
                         </form>
                     </section>

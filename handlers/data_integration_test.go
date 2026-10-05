@@ -92,11 +92,6 @@ func TestSubscriptionOperations(t *testing.T) {
 	}
 
 	// Test 9: Verify file persistence
-	// Simulate application restart by clearing cache
-	subscriptionCache.mutex.Lock()
-	subscriptionCache.subscriptions = nil
-	subscriptionCache.mutex.Unlock()
-
 	// Load from file again
 	subs, err = LoadSubscriptions(dataFile)
 	if err != nil {

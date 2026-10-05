@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"embed"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -24,7 +27,11 @@ import (
 // Version is the application version, set via ldflags during build
 var Version = "v1.0.20"
 
+//go:embed templates/index.html static
+var webAssets embed.FS
+
 type Config struct {
+	ListenAddress     string        `yaml:"listen_address"`
 	Port              int           `yaml:"port"`
 	DataDir           string        `yaml:"data_dir"`
 	MaxFileSize       int64         `yaml:"max_file_size"`
@@ -93,7 +100,7 @@ func main() {
 //  1. TOKEN env var (docker -e TOKEN=...) wins if set;
 //  2. otherwise a non-default token from config.yaml is kept;
 //  3. otherwise a random token is generated, written back to the config file
-//     and printed to the log so the operator can find it.
+//     so the operator can read it from that private file.
 func resolveAdminToken(envToken string, cfg Config, configPath string) (Config, error) {
 	if envToken != "" {
 		cfg.Token = envToken
@@ -112,9 +119,9 @@ func resolveAdminToken(envToken string, cfg Config, configPath string) (Config, 
 	cfg.Token = token
 
 	if err := persistTokenToConfig(configPath, token); err != nil {
-		logger.Warnf("无法将访问密钥写入 %s（%v），重启后会重新生成", configPath, err)
+		return cfg, fmt.Errorf("persist admin token: %w", err)
 	}
-	logger.Infof("未配置访问密钥，已随机生成并写入 %s: %s", configPath, token)
+	logger.Infof("未配置访问密钥，已随机生成并写入 %s", configPath)
 
 	return cfg, nil
 }
@@ -139,7 +146,7 @@ func persistTokenToConfig(path string, token string) error {
 		if !os.IsNotExist(err) {
 			return err
 		}
-		return os.WriteFile(path, []byte(tokenLine+"\n"), 0644)
+		return handlers.WritePrivateFile(path, []byte(tokenLine+"\n"))
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -157,7 +164,7 @@ func persistTokenToConfig(path string, token string) error {
 	if !replaced {
 		lines = append(lines, tokenLine)
 	}
-	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
+	return handlers.WritePrivateFile(path, []byte(strings.Join(lines, "\n")))
 }
 
 func logStartup(cfg Config) {
@@ -203,7 +210,7 @@ func loadConfig(path string) (Config, error) {
 
 func newServer(cfg Config, handler http.Handler) *http.Server {
 	return &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Port),
+		Addr:         net.JoinHostPort(cfg.ListenAddress, strconv.Itoa(cfg.Port)),
 		Handler:      handler,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
@@ -243,8 +250,11 @@ func newRouter(h *handlers.Handler) http.Handler {
 
 	router.HandleFunc("/health", h.HealthHandler).Methods(http.MethodGet)
 
-	fs := http.FileServer(http.Dir("static"))
-	router.PathPrefix("/static/").Handler(http.StripPrefix("/static/", fs))
+	staticAssets, err := fs.Sub(webAssets, "static")
+	if err != nil {
+		panic(err) // The embedded directory is fixed at compile time.
+	}
+	router.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.FS(staticAssets))))
 
 	return router
 }
@@ -256,6 +266,7 @@ func newHandlerConfig(cfg Config) *handlers.Config {
 		DownloadTimeout: cfg.DownloadTimeout,
 		RateLimit:       cfg.RateLimit,
 		Token:           cfg.Token,
+		WebAssets:       webAssets,
 	}
 }
 

@@ -2,6 +2,14 @@
 
 一个自托管的 Clash 订阅管理面板：把机场订阅、自建节点统一管理起来，自动转换格式，并按模板生成你自己的 Clash 配置链接。
 
+本 fork 也支持把已有的本地完整 Clash YAML 集中托管：在模板页面选择「完整配置原样托管」，导入 `.yaml` / `.yml` 文件或直接粘贴，保存后复制配置地址到各台客户端。以后在这里修改，各客户端通过更新该订阅获取新内容。原样托管保留节点、分组、规则、DNS、注释与换行，不重新生成配置；只提供完整配置下载。
+
+「订阅生成」模式保留上游的模板组合功能。已有 v1.0.20 模板以及省略 `mode` 的 API 请求仍按订阅生成模式处理；新建页面默认使用原样托管。保存前会验证 YAML，校验失败保留上一份配置。配置文件与缓存通过原子替换发布，并发保存按完整事务串行执行。
+
+程序内嵌网页资源，单个可执行文件可在任意工作目录运行。配置文件仍从当前目录的 `config.yaml` 读取；`listen_address: "127.0.0.1"` 可用于 Nginx 反向代理，空值则监听所有接口。管理密钥保存在配置文件中，不写入启动日志。
+
+Linux systemd 服务模板见 [deploy/clash-subscription-manager.service](deploy/clash-subscription-manager.service)。创建专用 `clash-config` 用户，将程序放在 `/opt/clash-subscription-manager/`，将配置放在 `/etc/clash-subscription-manager/config.yaml`，设置 `data_dir: /var/lib/clash-subscription-manager`、`listen_address: "127.0.0.1"` 和自行选择的空闲 `port`。启动前必须填写随机生成的管理 `token`，不要保留默认占位符；服务用户不能改写由 root 管理的配置。配置文件应设置为 `root:clash-config`、`0640`，目录为 `0750`。通过 Nginx 提供 HTTPS 时，应用的 `https` 设为 `false`，并限制允许的局域网来源。订阅 URL 含访问令牌，应避免在反向代理访问日志中记录查询参数。
+
 适用场景：想在一台服务器/软路由上集中管理多个机场订阅，生成带节点筛选、自选分组、固定规则的个人 Clash 配置，分发给电脑、手机等多个设备使用。
 
 [![Docker Pulls](https://img.shields.io/docker/pulls/zhf883680/clash-subscription-manager)](https://hub.docker.com/r/zhf883680/clash-subscription-manager)

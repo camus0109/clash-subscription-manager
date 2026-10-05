@@ -1,0 +1,32 @@
+[Unit]
+Description=Clash configuration and subscription manager
+After=network.target
+
+[Service]
+Type=simple
+User=clash-config
+Group=clash-config
+WorkingDirectory=/etc/clash-subscription-manager
+ExecStart=/opt/clash-subscription-manager/clash-subscription-manager
+StateDirectory=clash-subscription-manager
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+MemoryMax=128M
+TasksMax=32
+LimitNOFILE=4096
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/clash-subscription-manager
+
+[Install]
+WantedBy=multi-user.target

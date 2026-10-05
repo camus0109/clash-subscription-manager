@@ -3,7 +3,6 @@ package handlers
 import (
 	"fmt"
 	"net/http"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -80,7 +79,7 @@ func (h *Handler) refreshSubscription(id string, dataFile string, payload subscr
 			}
 		}
 	} else {
-		if err := os.WriteFile(filepath.Join(h.config.DataDir, filePath), convertedContent, 0644); err != nil {
+		if err := atomicWriteFile(filepath.Join(h.config.DataDir, filePath), convertedContent, 0600); err != nil {
 			return h.recordRefreshFailure(id, dataFile, err), &refreshFailure{
 				statusCode: http.StatusInternalServerError,
 				err:        fmt.Errorf("Failed to update cached file: %v", err),

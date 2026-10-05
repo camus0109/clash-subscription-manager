@@ -3,6 +3,8 @@ let subscriptions = [];
 let templates = [];
 let currentTemplateId = null;
 let currentTemplateToken = "";
+let pristineTemplateContent = null;
+let templateContentEdited = false;
 
 // ── Utilities ────────────────────────────────────────────────────────────────
 
@@ -126,6 +128,20 @@ function templateCopyPath(mode) {
   return `/api/templates/${currentTemplateId}/${suffix}?token=${encodeURIComponent(currentTemplateToken || "")}`;
 }
 
+function copyDefaultTemplateLink(mode) {
+  const item = templates.find((t) => t.is_default);
+  if (!item?.access_token) {
+    showToast("请先保存默认配置", true);
+    return;
+  }
+  if (item.mode === "raw" && mode !== "providers") {
+    showToast("原样托管请使用完整配置地址", true);
+    return;
+  }
+  const suffix = TEMPLATE_RENDER_SUFFIX[mode] || "render";
+  copyToClipboard(`${location.origin}/api/templates/default/${suffix}?token=${encodeURIComponent(item.access_token)}`);
+}
+
 function formatBytes(bytes) {
   if (bytes === 0) return "0 B";
   const k = 1024;
@@ -186,11 +202,11 @@ function initQuickActions() {
   });
 
   document.getElementById("default-template-link-btn")?.addEventListener("click", () => {
-    copyToClipboard(`${location.origin}/default-template`);
+    copyDefaultTemplateLink("providers");
   });
 
   document.getElementById("default-expanded-template-link-btn")?.addEventListener("click", () => {
-    copyToClipboard(`${location.origin}/default-template/proxies`);
+    copyDefaultTemplateLink("proxies");
   });
 }
 
@@ -657,7 +673,7 @@ function renderTemplateList() {
         <h3 class="template-name">${escapeHtml(t.name)}</h3>
       </div>
       <p class="template-card-meta">
-        ${t.use_all_subscriptions ? "使用全部订阅" : `${(t.selected_subscription_ids || []).length} 个订阅`}
+        ${t.mode === "raw" ? "完整配置原样托管" : (t.use_all_subscriptions ? "使用全部订阅" : `${(t.selected_subscription_ids || []).length} 个订阅`)}
         · ${relativeTime(t.updated_at)}
       </p>
       <div class="template-actions">
@@ -704,7 +720,10 @@ function populateTemplateForm(t) {
   form.reset();
   form.querySelector('[name="id"]').value = t.id;
   form.querySelector('[name="name"]').value = t.name;
+  form.querySelector('[name="mode"]').value = t.mode || "generated";
   form.querySelector('[name="content"]').value = t.content;
+  pristineTemplateContent = t.mode === "raw" ? t.content : null;
+  templateContentEdited = false;
   document.getElementById("template-current-name").textContent = t.name;
   document.getElementById("template-editor-status").textContent = "编辑模式";
   document.getElementById("template-current-subscription-count").textContent = t.use_all_subscriptions
@@ -713,6 +732,7 @@ function populateTemplateForm(t) {
 
   // Populate subscription options
   renderTemplateSubscriptionOptions(t);
+  updateTemplateModeUI(t.mode || "generated");
 
   // Show delete button only for existing templates
   const deleteBtn = document.getElementById("delete-template-btn");
@@ -746,6 +766,19 @@ function renderTemplateSubscriptionOptions(template) {
   `
     )
     .join("");
+}
+
+function updateTemplateModeUI(mode) {
+  const raw = mode === "raw";
+  const field = document.querySelector(".template-subscription-field");
+  if (field) field.hidden = raw;
+  const content = document.getElementById("template-content-input");
+  if (content) content.placeholder = raw ? "输入或导入完整 Clash YAML 配置，保存后按原内容输出" : "输入基础 YAML 配置";
+  document.querySelectorAll(".copy-dropdown-item").forEach((item) => {
+    item.hidden = raw && item.dataset.copy !== "providers";
+    if (item.dataset.copy === "providers") item.textContent = raw ? "复制完整配置地址" : "复制模板地址";
+  });
+  if (raw) document.getElementById("template-current-subscription-count").textContent = "完整配置原样输出";
 }
 
 // ── Template Form ────────────────────────────────────────────────────────────
@@ -814,6 +847,10 @@ function initTemplateForm() {
   const form = document.getElementById("template-form");
   if (!form) return;
 
+  document.getElementById("template-content-input")?.addEventListener("input", () => {
+    templateContentEdited = true;
+  });
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const btn = document.getElementById("template-submit-btn");
@@ -838,7 +875,10 @@ function initTemplateForm() {
 
       const payload = {
         name: fd.get("name"),
-        content: fd.get("content"),
+        mode: fd.get("mode") || "raw",
+        content: fd.get("mode") === "raw" && pristineTemplateContent !== null && !templateContentEdited
+          ? pristineTemplateContent
+          : fd.get("content"),
         use_all_subscriptions: useAll,
         selected_subscription_ids: selectedIds,
         subscription_prefixes: subscriptionPrefixes,
@@ -943,6 +983,32 @@ function initTemplateForm() {
 
   document.getElementById("new-template-btn")?.addEventListener("click", newTemplate);
 
+  document.getElementById("template-mode-input")?.addEventListener("change", (e) => {
+    const content = document.getElementById("template-content-input");
+    if (e.target.value === "generated" && !content.value) content.value = NEW_TEMPLATE_DEFAULT_CONTENT;
+    updateTemplateModeUI(e.target.value);
+  });
+  document.getElementById("template-file-input")?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 50 * 1024 * 1024) {
+      showToast("配置文件过大", true);
+      e.target.value = "";
+      return;
+    }
+    try {
+      pristineTemplateContent = await file.text();
+      templateContentEdited = false;
+      document.getElementById("template-content-input").value = pristineTemplateContent;
+      document.getElementById("template-mode-input").value = "raw";
+      updateTemplateModeUI("raw");
+    } catch (err) {
+      showToast("读取 YAML 文件失败: " + err.message, true);
+    } finally {
+      e.target.value = "";
+    }
+  });
+
   document.getElementById("select-all-template-subscriptions-btn")?.addEventListener("click", () => {
     document.querySelectorAll('#template-form input[name="template-subs"]').forEach((c) => (c.checked = true));
   });
@@ -955,13 +1021,17 @@ function initTemplateForm() {
 function newTemplate() {
   currentTemplateId = null;
   currentTemplateToken = "";
+  pristineTemplateContent = null;
+  templateContentEdited = false;
   const form = document.getElementById("template-form");
   if (form) {
     form.reset();
     const idInput = form.querySelector('[name="id"]');
     if (idInput) idInput.value = "";
     const contentInput = form.querySelector('[name="content"]');
-    if (contentInput) contentInput.value = NEW_TEMPLATE_DEFAULT_CONTENT;
+    if (contentInput) contentInput.value = "";
+    const modeInput = form.querySelector('[name="mode"]');
+    if (modeInput) modeInput.value = "raw";
   }
   document.getElementById("template-editor-status").textContent = "新建模式";
   document.getElementById("template-current-name").textContent = "未命名模板";
@@ -969,6 +1039,7 @@ function newTemplate() {
   const deleteBtn = document.getElementById("delete-template-btn");
   if (deleteBtn) deleteBtn.style.display = "none";
   renderTemplateSubscriptionOptions({});
+  updateTemplateModeUI("raw");
   renderTemplateList();
 }
 

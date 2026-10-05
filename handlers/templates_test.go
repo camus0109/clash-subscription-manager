@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -160,6 +161,71 @@ rules:
 	}
 	if strings.Contains(body, "ai-source.yaml\n    filter:") {
 		t.Fatalf("body should omit empty filter field: %s", body)
+	}
+}
+
+func TestRenderRawTemplatePreservesCompleteYAML(t *testing.T) {
+	dataDir := t.TempDir()
+	content := "# keep this comment\r\ndefaults: &defaults\r\n  interval: 300\r\nproxy-providers:\r\n  main:\r\n    <<: *defaults\r\n    type: http\r\nproxies: []\r\n"
+	templateRecord, err := AddTemplate(models.Template{
+		Name: "raw", Mode: "raw", Content: content, UpdatedAt: time.Now(),
+	}, filepath.Join(dataDir, "templates.json"))
+	if err != nil {
+		t.Fatalf("AddTemplate() error = %v", err)
+	}
+	handler := NewHandler(&Config{DataDir: dataDir, MaxFileSize: 4096})
+	req := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/templates/"+templateRecord.ID+"/render", nil), map[string]string{"id": templateRecord.ID})
+	rec := httptest.NewRecorder()
+	handler.RenderTemplateHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body = %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != content {
+		t.Fatalf("raw content changed: got %q, want %q", rec.Body.String(), content)
+	}
+	proxiesReq := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/templates/"+templateRecord.ID+"/render-proxies", nil), map[string]string{"id": templateRecord.ID})
+	proxiesRec := httptest.NewRecorder()
+	handler.RenderTemplateProxiesHandler(proxiesRec, proxiesReq)
+	if proxiesRec.Code != http.StatusBadRequest {
+		t.Fatalf("raw proxies status = %d, want %d", proxiesRec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestCreateTemplateRejectsInvalidYAML(t *testing.T) {
+	dataDir := t.TempDir()
+	templatesFile := filepath.Join(dataDir, "templates.json")
+	if _, err := AddTemplate(models.Template{Name: "existing", Mode: "raw", Content: "port: 7890\n", UpdatedAt: time.Now()}, templatesFile); err != nil {
+		t.Fatalf("AddTemplate() error = %v", err)
+	}
+	handler := NewHandler(&Config{DataDir: dataDir, MaxFileSize: 4096})
+	req := httptest.NewRequest(http.MethodPost, "/templates", strings.NewReader(`{"name":"bad","mode":"raw","content":"port: ["}`))
+	rec := httptest.NewRecorder()
+	handler.TemplatesHandler(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; body = %s", rec.Code, rec.Body.String())
+	}
+	templates, err := ListTemplates(templatesFile)
+	if err != nil {
+		t.Fatalf("ListTemplates() error = %v", err)
+	}
+	if len(templates) != 1 || templates[0].Name != "existing" {
+		t.Fatalf("invalid request mutated templates: %+v", templates)
+	}
+}
+
+func TestCreateTemplateRejectsDuplicateYAMLKeys(t *testing.T) {
+	dataDir := t.TempDir()
+	handler := NewHandler(&Config{DataDir: dataDir, MaxFileSize: 4096})
+	for _, content := range []string{
+		"port: 7890\nport: 7891\n",
+		"profile:\n  store-selected: true\n  store-selected: false\n",
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/templates", strings.NewReader(`{"name":"duplicate","mode":"raw","content":`+strconv.Quote(content)+`}`))
+		rec := httptest.NewRecorder()
+		handler.TemplatesHandler(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("duplicate YAML status = %d; body = %s", rec.Code, rec.Body.String())
+		}
 	}
 }
 

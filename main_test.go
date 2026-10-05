@@ -257,6 +257,29 @@ func TestNewRouterServesLogoAssets(t *testing.T) {
 	}
 }
 
+func TestEmbeddedWebAssetsWorkOutsideSourceDirectory(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.DataDir = t.TempDir()
+	t.Chdir(t.TempDir())
+	router := newRouter(handlers.NewHandler(newHandlerConfig(cfg)))
+	for _, path := range []string{"/", "/static/js/main.js", "/static/css/style.css", "/static/img/logo-icon.svg"} {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK || rec.Body.Len() == 0 {
+			t.Fatalf("embedded %s: status %d, bytes %d", path, rec.Code, rec.Body.Len())
+		}
+	}
+}
+
+func TestNewServerUsesConfiguredListenAddress(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.ListenAddress = "127.0.0.1"
+	cfg.Port = 17832
+	if got := newServer(cfg, http.NotFoundHandler()).Addr; got != "127.0.0.1:17832" {
+		t.Fatalf("listen address = %s", got)
+	}
+}
+
 func TestLogStartupIncludesVersionAndPort(t *testing.T) {
 	var buffer bytes.Buffer
 	originalOut := logger.Out

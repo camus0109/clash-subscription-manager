@@ -3,9 +3,9 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -24,6 +24,7 @@ import (
 type templatePayload struct {
 	Name                    string            `json:"name"`
 	Content                 string            `json:"content"`
+	Mode                    string            `json:"mode"`
 	SelectedSubscriptionIDs []string          `json:"selected_subscription_ids"`
 	UseAllSubscriptions     *bool             `json:"use_all_subscriptions"`
 	SubscriptionPrefixes    map[string]string `json:"subscription_prefixes"`
@@ -73,7 +74,7 @@ func (h *Handler) TemplateHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		h.respondJSON(w, http.StatusOK, Response{Success: true, Data: item})
 	case http.MethodPut:
-		payload, err := decodeTemplatePayload(r)
+		payload, err := h.decodeTemplatePayload(r)
 		if err != nil {
 			h.respondJSON(w, http.StatusBadRequest, Response{
 				Success: false,
@@ -84,6 +85,7 @@ func (h *Handler) TemplateHandler(w http.ResponseWriter, r *http.Request) {
 		item, err := UpdateTemplate(id, dataFile, func(template *models.Template) error {
 			template.Name = payload.Name
 			template.Content = payload.Content
+			template.Mode = payload.Mode
 			template.SelectedSubscriptionIDs = payload.SelectedSubscriptionIDs
 			template.UseAllSubscriptions = payload.UseAllSubscriptions
 			template.SubscriptionPrefixes = payload.SubscriptionPrefixes
@@ -222,7 +224,7 @@ func (h *Handler) RenderDefaultTemplateNodeLinksHandler(w http.ResponseWriter, r
 }
 
 func (h *Handler) createTemplate(w http.ResponseWriter, r *http.Request) {
-	payload, err := decodeTemplatePayload(r)
+	payload, err := h.decodeTemplatePayload(r)
 	if err != nil {
 		h.respondJSON(w, http.StatusBadRequest, Response{
 			Success: false,
@@ -234,6 +236,7 @@ func (h *Handler) createTemplate(w http.ResponseWriter, r *http.Request) {
 	item, err := AddTemplate(models.Template{
 		Name:                    payload.Name,
 		Content:                 payload.Content,
+		Mode:                    payload.Mode,
 		SelectedSubscriptionIDs: payload.SelectedSubscriptionIDs,
 		UseAllSubscriptions:     payload.UseAllSubscriptions,
 		SubscriptionPrefixes:    payload.SubscriptionPrefixes,
@@ -282,6 +285,12 @@ const (
 )
 
 func (h *Handler) renderTemplateContent(r *http.Request, item *models.Template, mode templateRenderMode) ([]byte, error) {
+	if item.Mode == "raw" {
+		if mode != templateRenderModeProviders {
+			return nil, fmt.Errorf("raw templates only support the complete configuration export")
+		}
+		return []byte(item.Content), nil
+	}
 	subscriptions, err := ListSubscriptions(filepath.Join(h.config.DataDir, "subscriptions.json"))
 	if err != nil {
 		return nil, fmt.Errorf("load subscriptions: %w", err)
@@ -357,7 +366,7 @@ func (h *Handler) renderNodeLinks(subscriptions []models.Subscription) ([]byte, 
 		}
 
 		filePath := filepath.Join(h.config.DataDir, sub.FilePath)
-		data, err := os.ReadFile(filePath)
+		data, err := readFile(filePath)
 		if err != nil {
 			return nil, fmt.Errorf("read subscription file for %q: %w", sub.Name, err)
 		}
@@ -611,7 +620,7 @@ func (h *Handler) collectExpandedProxyNodes(subscriptions []models.Subscription)
 		}
 
 		filePath := filepath.Join(h.config.DataDir, subscription.FilePath)
-		data, err := os.ReadFile(filePath)
+		data, err := readFile(filePath)
 		if err != nil {
 			return nil, fmt.Errorf("read subscription file for %q: %w", subscription.Name, err)
 		}
@@ -703,22 +712,44 @@ func decodeYAMLUnicodeEscapes(value string) string {
 	})
 }
 
-func decodeTemplatePayload(r *http.Request) (templatePayload, error) {
+func (h *Handler) decodeTemplatePayload(r *http.Request) (templatePayload, error) {
 	var payload templatePayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	limit := h.config.MaxFileSize
+	if limit <= 0 {
+		limit = 50 * 1024 * 1024
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil {
+		return templatePayload{}, fmt.Errorf("read request body: %w", err)
+	}
+	if int64(len(body)) > limit {
+		return templatePayload{}, fmt.Errorf("request body too large (max: %d bytes)", limit)
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
 		return templatePayload{}, err
+	}
+	if payload.Content != "" && int64(len(payload.Content)) > limit {
+		return templatePayload{}, fmt.Errorf("content too large (max: %d bytes)", limit)
 	}
 
 	payload.Name = strings.TrimSpace(payload.Name)
-	payload.Content = strings.TrimSpace(payload.Content)
+	if payload.Mode == "" {
+		payload.Mode = "generated"
+	}
+	if payload.Mode != "raw" && payload.Mode != "generated" {
+		return templatePayload{}, fmt.Errorf("mode must be raw or generated")
+	}
+	if payload.Mode == "generated" {
+		payload.Content = strings.TrimSpace(payload.Content)
+	}
 	if payload.Name == "" {
 		return templatePayload{}, fmt.Errorf("name is required")
 	}
 	if payload.Content == "" {
 		return templatePayload{}, fmt.Errorf("content is required")
 	}
-	if !strings.Contains(payload.Content, "proxy-providers:") {
-		payload.Content = strings.TrimRight(payload.Content, "\n") + "\n\nproxy-providers:\n"
+	if err := validateTemplateYAML(payload.Content, limit); err != nil {
+		return templatePayload{}, err
 	}
 
 	selectedIDs := make([]string, 0, len(payload.SelectedSubscriptionIDs))
@@ -742,4 +773,115 @@ func decodeTemplatePayload(r *http.Request) (templatePayload, error) {
 	}
 
 	return payload, nil
+}
+
+// validateTemplateYAML accepts exactly one bounded mapping document. yaml.v3
+// reports duplicate mapping keys; rejecting aliases keeps validation finite and
+// avoids accepting YAML constructs that expand unexpectedly at render time.
+func validateTemplateYAML(content string, limit int64) error {
+	if int64(len(content)) > limit {
+		return fmt.Errorf("content too large (max: %d bytes)", limit)
+	}
+	decoder := yaml.NewDecoder(strings.NewReader(content))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
+		return fmt.Errorf("invalid YAML: %w", err)
+	}
+	if len(document.Content) == 0 || document.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("YAML root must be a mapping")
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("YAML must contain one document")
+		}
+		return fmt.Errorf("invalid YAML document: %w", err)
+	}
+	return validateYAMLGraph(&document)
+}
+
+// validateYAMLGraph walks the parsed YAML graph with explicit bounds. Anchors
+// and aliases are allowed, but malformed targets and cycles are rejected.
+func validateYAMLGraph(document *yaml.Node) error {
+	type frame struct {
+		node  *yaml.Node
+		depth int
+		exit  bool
+	}
+	const maxNodes = 200000
+	const maxDepth = 1024
+	stack := make([]frame, 0, 128)
+	visited := make(map[*yaml.Node]struct{})
+	active := make(map[*yaml.Node]struct{})
+	_enqueue := func(node *yaml.Node, depth int) error {
+		if node == nil {
+			return fmt.Errorf("YAML contains a missing node")
+		}
+		if depth > maxDepth {
+			return fmt.Errorf("YAML nesting is too deep")
+		}
+		if _, ok := active[node]; ok {
+			return fmt.Errorf("YAML alias cycle detected")
+		}
+		if _, ok := visited[node]; ok {
+			return nil
+		}
+		if len(visited) >= maxNodes || len(stack) >= maxNodes*2 {
+			return fmt.Errorf("YAML document is too complex")
+		}
+		visited[node] = struct{}{}
+		stack = append(stack, frame{node: node, depth: depth})
+		return nil
+	}
+	if err := _enqueue(document, 0); err != nil {
+		return err
+	}
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		current := stack[last]
+		stack = stack[:last]
+		if current.exit {
+			delete(active, current.node)
+			continue
+		}
+		if _, ok := active[current.node]; ok {
+			return fmt.Errorf("YAML alias cycle detected")
+		}
+		active[current.node] = struct{}{}
+		if len(stack) >= maxNodes*2 {
+			return fmt.Errorf("YAML document is too complex")
+		}
+		stack = append(stack, frame{node: current.node, depth: current.depth, exit: true})
+
+		node := current.node
+		if node.Kind == yaml.AliasNode {
+			if node.Alias == nil {
+				return fmt.Errorf("YAML alias has no target")
+			}
+			if err := _enqueue(node.Alias, current.depth+1); err != nil {
+				return err
+			}
+			continue
+		}
+		if node.Kind == yaml.MappingNode {
+			keys := make(map[string]struct{}, len(node.Content)/2)
+			for index := 0; index+1 < len(node.Content); index += 2 {
+				key := node.Content[index]
+				if key.Kind != yaml.ScalarNode {
+					continue
+				}
+				canonical := key.Tag + "\x00" + key.Value
+				if _, exists := keys[canonical]; exists {
+					return fmt.Errorf("duplicate YAML key %q", key.Value)
+				}
+				keys[canonical] = struct{}{}
+			}
+		}
+		for index := len(node.Content) - 1; index >= 0; index-- {
+			if err := _enqueue(node.Content[index], current.depth+1); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

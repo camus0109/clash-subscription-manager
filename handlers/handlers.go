@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -31,6 +32,7 @@ type Response struct {
 
 // Config represents handler configuration
 type Config struct {
+	WebAssets       fs.FS
 	DataDir         string
 	MaxFileSize     int64
 	DownloadTimeout time.Duration
@@ -196,15 +198,11 @@ func (h *Handler) TemplateLinkAuth(next http.HandlerFunc) http.HandlerFunc {
 // homeHandler serves the main HTML page
 func (h *Handler) HomeHandler(w http.ResponseWriter, r *http.Request) {
 	// Parse template
-	tmplPath, err := resolveTemplatePath("index.html")
-	if err != nil {
-		h.respondJSON(w, http.StatusInternalServerError, Response{
-			Success: false,
-			Error:   err.Error(),
-		})
+	if h.config.WebAssets == nil {
+		http.Error(w, "web assets are not configured", http.StatusInternalServerError)
 		return
 	}
-	tmpl, err := template.ParseFiles(tmplPath)
+	tmpl, err := template.ParseFS(h.config.WebAssets, "templates/index.html")
 	if err != nil {
 		h.respondJSON(w, http.StatusInternalServerError, Response{
 			Success: false,
@@ -614,7 +612,7 @@ func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filePath := filepath.Join(h.config.DataDir, subscription.FilePath)
-	content, err := os.ReadFile(filePath)
+	content, err := readFile(filePath)
 	if err != nil {
 		h.respondJSON(w, http.StatusNotFound, Response{
 			Success: false,
@@ -705,7 +703,7 @@ func (h *Handler) storeSubscriptionFile(name string, content []byte) (string, er
 
 	fileName := fmt.Sprintf("%s-%s.yaml", sanitizeFilename(name), generateID())
 	filePath := filepath.Join(h.config.DataDir, fileName)
-	if err := os.WriteFile(filePath, content, 0644); err != nil {
+	if err := atomicWriteFile(filePath, content, 0600); err != nil {
 		return "", err
 	}
 
@@ -721,21 +719,6 @@ func sanitizeFilename(name string) string {
 		return "subscription"
 	}
 	return sanitized
-}
-
-func resolveTemplatePath(name string) (string, error) {
-	candidates := []string{
-		filepath.Join("templates", name),
-		filepath.Join("..", "templates", name),
-	}
-
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate, nil
-		}
-	}
-
-	return "", fmt.Errorf("template %q not found", name)
 }
 
 func decodeSubscriptionPayload(r *http.Request) (subscriptionPayload, error) {
