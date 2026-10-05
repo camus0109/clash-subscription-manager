@@ -271,7 +271,7 @@ func (h *Handler) writeRenderedTemplate(w http.ResponseWriter, r *http.Request, 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	} else {
 		w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.yaml\"", sanitizeFilename(item.Name)))
+		w.Header().Set("Content-Disposition", yamlAttachmentDisposition(item.Name))
 	}
 	_, _ = w.Write(rendered)
 }

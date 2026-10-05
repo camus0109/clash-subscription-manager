@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -211,7 +212,7 @@ func TestDownloadHandlerServesStoredSubscriptionFile(t *testing.T) {
 	err := SaveSubscriptions([]models.Subscription{
 		{
 			ID:       "sub-1",
-			Name:     "demo",
+			Name:     "Lisa LAN",
 			URL:      "http://example.invalid/sub",
 			FilePath: storedName,
 			FileSize: int64(len("stored-proxy-file")),
@@ -238,6 +239,45 @@ func TestDownloadHandlerServesStoredSubscriptionFile(t *testing.T) {
 	}
 	if rec.Body.String() != "stored-proxy-file" {
 		t.Fatalf("body = %q, want %q", rec.Body.String(), "stored-proxy-file")
+	}
+	assertYAMLAttachmentFilename(t, rec, "Lisa-LAN.yaml")
+}
+
+func TestDownloadHandlerFormatsHostileFilenameSafely(t *testing.T) {
+	dataDir := t.TempDir()
+	content := []byte("stored-proxy-file")
+	writeHandlerTestFile(t, filepath.Join(dataDir, "stored.yaml"), content)
+	name := `Lisa "LAN\prod`
+	if err := SaveSubscriptions([]models.Subscription{{
+		ID: "sub-hostile", Name: name, FilePath: "stored.yaml", FileSize: int64(len(content)),
+	}}, filepath.Join(dataDir, "subscriptions.json")); err != nil {
+		t.Fatalf("SaveSubscriptions() error = %v", err)
+	}
+	handler := NewHandler(&Config{DataDir: dataDir, MaxFileSize: 1024})
+	req := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/download/sub-hostile", nil), map[string]string{"id": "sub-hostile"})
+	rec := httptest.NewRecorder()
+	handler.DownloadHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if rec.Body.String() != string(content) {
+		t.Fatalf("body = %q, want %q", rec.Body.String(), content)
+	}
+	assertYAMLAttachmentFilename(t, rec, "Lisa-LAN-prod.yaml")
+}
+
+func assertYAMLAttachmentFilename(t *testing.T, rec *httptest.ResponseRecorder, want string) {
+	t.Helper()
+	header := rec.Header().Get("Content-Disposition")
+	_, params, err := mime.ParseMediaType(header)
+	if err != nil {
+		t.Fatalf("mime.ParseMediaType(%q) error = %v", header, err)
+	}
+	if got := params["filename"]; got != want {
+		t.Fatalf("Content-Disposition filename = %q, want %q (header %q)", got, want, header)
+	}
+	if strings.ContainsAny(header, `"\`) {
+		t.Fatalf("Content-Disposition should not contain quotes or backslashes: %q", header)
 	}
 }
 
@@ -347,7 +387,7 @@ func TestHomeHandlerRendersStaticAssetLinks(t *testing.T) {
 	}
 }
 
-func TestHomeHandlerRendersHeroLogoBranding(t *testing.T) {
+func TestHomeHandlerRendersCompactHeroBranding(t *testing.T) {
 	handler := NewHandler(&Config{
 		WebAssets:       os.DirFS(".."),
 		DataDir:         t.TempDir(),
@@ -365,20 +405,17 @@ func TestHomeHandlerRendersHeroLogoBranding(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if !strings.Contains(body, `/static/img/logo-primary.svg`) {
-		t.Fatalf("body missing primary logo asset: %s", body)
+	if !strings.Contains(body, `class="hero-brand-mark" src="/static/img/logo-icon.svg"`) {
+		t.Fatalf("body missing compact logo asset")
 	}
-	if !strings.Contains(body, `class="hero-brand"`) {
-		t.Fatalf("body missing hero brand row: %s", body)
+	if !strings.Contains(body, `class="hero-title"`) {
+		t.Fatalf("body missing compact title row")
 	}
 	if !strings.Contains(body, `alt="Clash Subscription Manager logo"`) {
 		t.Fatalf("body missing primary logo alt text: %s", body)
 	}
 	if !strings.Contains(body, `Clash 订阅管理`) {
 		t.Fatalf("body missing existing Chinese page title: %s", body)
-	}
-	if strings.Index(body, `class="hero-brand"`) > strings.Index(body, `class="eyebrow"`) {
-		t.Fatalf("hero brand should render before eyebrow label: %s", body)
 	}
 }
 

@@ -191,6 +191,35 @@ func TestRenderRawTemplatePreservesCompleteYAML(t *testing.T) {
 	}
 }
 
+func TestRenderedTemplateAttachmentUsesSafeFilename(t *testing.T) {
+	for _, test := range []struct{ name, filename string }{
+		{"Lisa LAN", "Lisa-LAN.yaml"},
+		{`Lisa "LAN\prod`, "Lisa-LAN-prod.yaml"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			content := "port: 7890\nproxies: []\n"
+			templateRecord, err := AddTemplate(models.Template{
+				Name: test.name, Mode: "raw", Content: content, UpdatedAt: time.Now(),
+			}, filepath.Join(dataDir, "templates.json"))
+			if err != nil {
+				t.Fatalf("AddTemplate() error = %v", err)
+			}
+			handler := NewHandler(&Config{DataDir: dataDir, MaxFileSize: 4096})
+			req := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/templates/"+templateRecord.ID+"/render", nil), map[string]string{"id": templateRecord.ID})
+			rec := httptest.NewRecorder()
+			handler.RenderTemplateHandler(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			if rec.Body.String() != content {
+				t.Fatalf("body = %q, want %q", rec.Body.String(), content)
+			}
+			assertYAMLAttachmentFilename(t, rec, test.filename)
+		})
+	}
+}
+
 func TestCreateTemplateRejectsInvalidYAML(t *testing.T) {
 	dataDir := t.TempDir()
 	templatesFile := filepath.Join(dataDir, "templates.json")

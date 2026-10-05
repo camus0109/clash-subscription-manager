@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -625,7 +626,7 @@ func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Set headers for download
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.yaml\"", sanitizeFilename(subscription.Name)))
+	w.Header().Set("Content-Disposition", yamlAttachmentDisposition(subscription.Name))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
 
 	// Write content
@@ -711,6 +712,12 @@ func (h *Handler) storeSubscriptionFile(name string, content []byte) (string, er
 }
 
 var filenameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
+
+func yamlAttachmentDisposition(name string) string {
+	return mime.FormatMediaType("attachment", map[string]string{
+		"filename": sanitizeFilename(name) + ".yaml",
+	})
+}
 
 func sanitizeFilename(name string) string {
 	sanitized := filenameSanitizer.ReplaceAllString(strings.TrimSpace(name), "-")
